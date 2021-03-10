@@ -1,0 +1,857 @@
+---
+title: "m01_v01_fare-amount_predictions_Modelling"
+author: "Data Science in Foco"
+date: "08/11/2020"
+output: 
+    html_document:
+        number_sections: true
+        toc: TRUE
+        toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, fig.width = 13, fig.height = 6)
+```
+
+# Importing Needed packages
+
+```{r ,echo=FALSE}
+
+library(tidyverse)
+library(kableExtra)
+library(htmltools)
+library(e1071)
+library(gridExtra)
+library(tidymodels)
+library(Boruta)
+library(lubridate)
+library(geosphere)
+
+```
+
+## Helper functions
+
+```{r, echo= FALSE }
+
+# Min/Max Scaler
+minmax_scaler <- function(x) {
+  
+    
+   return( ( x - min( x ) )  / ( max(x) - min(x) ) ) 
+}
+
+
+# Robust Scaler
+robust_scaler <- function(x){
+  
+  return( ( x - quantile( x , 0.5) )  / ( quantile(x ,0.75) - quantile(x, 0.25) ) )
+  
+}
+
+encode_target <- function(x, y, sigma = NULL) {
+  d <- aggregate(y, list(factor(x, exclude = NULL)), mean, na.rm = TRUE)
+  m <- d[is.na(as.character(d[, 1])), 2]
+  l <- d[, 2]
+  names(l) <- d[, 1]
+  l <- l[x]
+  l[is.na(l)] <- m
+  if (!is.null(sigma)) {
+    l <- l * rnorm(length(l), mean = 1, sd = sigma)
+  }
+  l
+}
+
+```
+
+
+## Reading the data
+
+```{r, Loading DataSet, echo=FALSE}
+
+df_raw <- read.csv("Data/train-sample-250000.csv",stringsAsFactors = T, encoding = "UTF-8")
+
+knitr::kable(head(df_raw)) %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"),html_font = "Cambria")
+
+```
+
+
+
+# Descricption of Data
+
+```{r, echo=FALSE}
+
+df1 <- df_raw
+
+```
+
+
+## Rename Columns 
+
+```{r, echo=FALSE, comment=""}
+df1 <- df1 %>% 
+  rename(key = "X.U.FEFF.key")
+
+names(df1)
+```
+
+## Data Dimensions
+
+```{r, echo=FALSE, comment=""}
+
+print(paste(  "this is data set has:", nrow(df1), "rows and:",ncol(df1), "columns"))
+
+```
+
+## Data Types
+
+```{r, echo=FALSE, comment=""}
+
+# Converting the key and pickup_datetime columns to datetime
+df1 <- df1 %>% 
+  mutate(key = ymd_hms(key), 
+         pickup_datetime= ymd_hms(pickup_datetime))
+
+glimpse(df1)
+
+```
+
+## Checking NA
+
+```{r, echo=FALSE, comment=""}
+
+kable(colSums(is.na(df1)),html_font = "Cambria")
+
+```
+
+## Descriptive Statistics
+
+```{r, echo=FALSE}
+
+# Numeric variables Only
+num_attribites <- df1 %>% 
+  keep(is.numeric) 
+  
+
+# Categorical Variables Only
+cat_attributes <- df1 %>% 
+  keep(is.factor)
+
+```
+
+### Numeric Attributes {.tabset}
+
+```{r, echo=FALSE}
+
+# Central Tendency  - mean , median
+ct1 <- as.data.frame( t(lapply(num_attribites, mean)))
+
+ct2 <- as.data.frame( t(lapply(num_attribites, median)))
+
+# dispersion - std, min, max, range, skew, kurtosis
+d1 <- as.data.frame( t(lapply(num_attribites, sd)))
+
+d2 <- as.data.frame( t(lapply(num_attribites, min)))
+
+d3 <- as.data.frame( t(lapply(num_attribites, max)))
+
+
+
+d5 <- as.data.frame( t(lapply(num_attribites, skewness)))
+
+d6 <- as.data.frame( t(lapply(num_attribites, kurtosis)))
+
+m <- t(bind_rows(d2,d3,ct1,ct2,d1,d5,d6))
+
+m <- as.data.frame(m)
+
+
+names(m) <- c("min","max","mean","median","std","skew", "kurtosis")
+
+
+kable(m) %>% 
+  kable_styling(full_width = T,html_font = "Cambria")
+
+```
+
+- **fare_amount** possui valores de tarifa negativos -7.7, e um valor maximo de 400 dolares , sendo a média de 11 dolares.  
+- **pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude** possui valores máximos e minimos muito distante da média.  
+- **passenger_count** possui um valor minimo de 0 o que não interessa na construção do modelo, e um valor máximo impossivel para um veiclulo que é de 208.
+
+
+- Distribuição de **fare_amount**
+- Distribution of **fare_amount**
+
+```{r, fig.width=12, fig.height= 4, echo=FALSE}
+
+fare_smaller_10 <- df1 %>%
+  filter(fare_amount < 10) %>% 
+  ggplot(aes(fare_amount))+
+  geom_histogram(bins = 100, color="black", fill="steelblue")+
+  xlim(0,10)
+
+fare_bigger_50 <- df1 %>%
+  filter(fare_amount > 50) %>% 
+  ggplot(aes(fare_amount))+
+  geom_histogram(bins = 100, color="black", fill="steelblue")+
+  xlim(50,400)+
+  scale_x_continuous(breaks = seq(50,400,50))
+
+
+grid.arrange(fare_smaller_10, fare_bigger_50, nrow= 1)
+```
+
+- Distribuição de **pickup_longitude e pickup_latitude**
+- Distribution of **pickup_longitude and pickup_latitude**
+
+```{r, fig.width=12, fig.height= 5, echo=FALSE}
+
+pickup_lon <- df1 %>%
+  ggplot(aes(pickup_longitude))+
+  geom_histogram(bins = 100, color="black", fill="steelblue")+
+  xlim(-76, -72)+
+  scale_y_continuous(labels = scales::label_number_si())
+
+pickup_lat <- df1 %>%
+  ggplot(aes(pickup_latitude))+
+  geom_histogram(bins = 100, color="black", fill="steelblue")+
+  xlim(39, 42)+
+  scale_y_continuous(labels = scales::label_number_si())
+
+grid.arrange(pickup_lon,pickup_lat, nrow= 1)
+  
+  
+```
+
+- Distribuição de **dropoff_longitude e dropoff_latitude**
+- Distribution of **dropoff_longitude and dropoff_latitude**
+
+```{r, fig.width=12, fig.height= 5, echo=FALSE}
+
+dropoff_lon <- df1 %>%
+  ggplot(aes(dropoff_longitude))+
+  geom_histogram(bins = 150, color="black", fill="steelblue")+
+  xlim(-76, -72)+
+  scale_y_continuous(labels = scales::label_number_si())
+
+dropoff_lat <- df1 %>%
+  ggplot(aes(dropoff_latitude))+
+  geom_histogram(bins = 150, color="black", fill="steelblue")+
+  xlim(39, 42)+
+  scale_y_continuous(labels = scales::label_number_si())
+
+grid.arrange(dropoff_lon,dropoff_lat, nrow= 1)
+  
+  
+```
+
+- Visualizando a quantidade de valores iguais a 0
+- Viewing the amount of values equal to 0
+
+```{r, echo=FALSE}
+
+df1 %>%
+  filter(passenger_count == 0) %>% 
+  summarise(count = length(passenger_count),
+            proportion = (count/nrow(df_raw))*100)
+
+```
+
+- Distribuição de **passenger_count**
+- Distribution of **passenger_count**
+
+```{r, echo=FALSE}
+
+df1 %>% 
+  filter(passenger_count < 20) %>% 
+  ggplot(aes(passenger_count) ) +
+  geom_histogram(bins = 100, col= "black", fill= "steelblue")
+
+```
+Verificando a quantidade de coordenadas que estão com valor zero, pois havendo valores inconsistentes isso implicara na criação da variavel distância da viagem e posteriormente na criação do modelo.
+
+Checking the number of coordinates that are zero, as there are inconsistent values, this will result in the creation of the variable travel distance and later in the creation of the model.
+
+```{r, echo=FALSE}
+
+df1 %>% 
+  select(pickup_longitude, pickup_latitude, dropoff_longitude, dropoff_latitude) %>% 
+  apply(2,function(x) sum(x == 0))
+
+```
+
+
+Ações nos valores inconsistente:  
+Actions on values inconsistent:  
+
+1. **pickup_longitude**
+    * filtrar os valores entre  -74.4 a  -73.4.  
+    * Apagar os registros , onde a coordenada é igual 0.  
+    * filter the values between -74.4 to -73.4. 
+    * delete the records, where the coordinate is equal to 0.  
+
+2. **pickup_latitude**
+    * filtrar os valores entre  41.2 a  40.2. 
+    * Apagar os registros , onde a coordenada é igual 0.  
+    * filter the values between 41.2 to 40.2.  
+    * delete the records, where the coordinate is equal to 0.  
+
+3. **dropoff_longitude**
+    * filtrar os valores entre  -74.4 a  -73.4. 
+    * Apagar os registros , onde a coordenada é igual 0. 
+    * filter the values between -74.4 to -73.4.  
+    * delete the records, where the coordinate is equal to 0. 
+
+4. **dropoff_latitude**
+    * filtrar os valores entre  41.2 a 40.2.  
+    * Apagar os registros , onde a coordenada é igual 0. 
+    * filter the values between 41.2 to 40.2.  
+    * delete the records, where the coordinate is equal to 0. 
+    
+5. **passenger_count**
+    * filtrar os valores entre  1 a 6 passageiros.  
+    * Apagar os registros , onde a coordenada é igual 0. 
+    * filter the values between 1 to 6 passengers.  
+
+6. **fare_amount**
+    * filtrar os valores entre  2 a 150 dolares.  
+    * filter the values between 2 to 150 dollars. 
+    
+```{r, echo=FALSE}
+
+
+# change range of pickup_longitude
+df1 <- df1 %>% 
+  filter(pickup_longitude > median(pickup_longitude) - 0.5 & pickup_longitude < median(pickup_longitude) + 0.5 )
+
+# change range of pickup_latitude
+df1 <- df1 %>% 
+  filter(pickup_latitude > median(pickup_latitude) - 0.5 & pickup_latitude < median(pickup_latitude) + 0.5 )
+
+# change range of dropoff_longitude
+df1 <- df1 %>% 
+  filter(dropoff_longitude > median(dropoff_longitude) - 0.5 & dropoff_longitude < median(dropoff_longitude) + 0.5 )
+
+# change range of dropoff_latitude
+df1 <- df1 %>% 
+  filter(dropoff_latitude > median(dropoff_latitude) - 0.5 & dropoff_latitude < median(dropoff_latitude) + 0.5 )
+
+# change range of Passanger_count
+df1 <- df1 %>% 
+  filter(passenger_count >= 1 & passenger_count <= 6)
+
+# change range of fare_amount
+df1 <- df1 %>% 
+  filter(fare_amount > 2 & fare_amount < 150)
+
+# Remove column key
+df1 <- df1 %>%
+  select(-key)
+
+```
+
+
+```{r}
+
+df1 <- df1 %>% 
+  filter(pickup_longitude != 0)
+
+df1 <- df1 %>% 
+  filter(pickup_latitude != 0)
+
+df1 <- df1 %>% 
+  filter(dropoff_longitude != 0)
+
+df1 <- df1 %>% 
+  filter(dropoff_longitude != 0)
+
+
+```
+
+
+# FEATURE ENGINEERING
+
+```{r}
+
+df2 <- df1
+```
+
+
+## Mindmap Hypotheses
+
+```{r  echo=FALSE, fig.cap="MindMapHypotheses", out.width = '100%'}
+
+knitr::include_graphics("img/MapHypotheses.png")
+
+```
+
+## List of Hypotheses
+
+### Trip Hypotheses
+
+**1.** Corridas com maiores distâncias deveriam ter tarifas maiores.  
+**1**  Longer runs should have higher fares.  
+
+### Localization  
+
+**1** As viagens de / para o aeroporto geralmente têm uma tarifa fixa.  
+**1** Trips to/from airport generally have a fixed fare.  
+
+**2** A tarifa pode ser diferente dependendo do tipo de bairro.  
+**2** The fare may differ depending on the type of neighborhood.
+
+### Temporal Hypotheses
+
+**1.** O número de corridas na madrugada deve ser menor.  
+**1**  The number of runs at dawn should be less.  
+
+**2** Aos finais de semana o número de corridas deveria ser maior.  
+**2** On weekends the number of runs should be higher.  
+
+**3** Nas férias escolares , Natal e Ano novo , o faturamento deve ser menor.  
+**3** In school holidays, Christmas and New Year, the revenue should be lower.  
+
+**4** Viagens no horario de pico , as tarifas deveriam ser mais altas.  
+**4** At peak travel times, fares should be higher.
+
+
+As seguintes features serão criadas:  
+The following features will be created:  
+
+- **hour_of_day** extraindo a hora de cada viagem.  
+- **hour_of_day** extracting the time of each trip.  
+
+- **days_of_week** extraindo nome do dia da semana de cada viagem.  
+- **days_of_week** extracting name of the day of the week for each trip.  
+
+- **day_of_year** extraindo dia do ano de cada viagem.  
+- **day_of_year** extracting day of the year from each trip.  
+
+- **travelled_distance_km** extraindo a distância em quilômetros de cada viagem.  
+- **travelled_distance_km** extracting the distance in kilometers of each trip.  
+
+- **month_fare** extraindo mês de cada viagem.  
+- **month_fare** extracting month of each trip.  
+
+- **key** como a feature key e pickup_datetime possuem as mesmas informações , removerei a mesma.  
+- **key** since the feature key and pickup_datetime have the same information, I’ll remove it.
+
+
+```{r, echo=FALSE}
+
+df2<- df2 %>% 
+  mutate(hour_of_day = hour(pickup_datetime),
+         days_of_week = weekdays(pickup_datetime, abbreviate= T),
+         day_of_year = yday(pickup_datetime),
+         day = day(pickup_datetime),
+         year = year(pickup_datetime),
+         travelled_distance_km = distHaversine(df2[,3:4], df2[,5:6]),
+         travelled_distance_km = round(travelled_distance_km/1000, 4),
+         month_fare = month(pickup_datetime))
+
+
+```
+
+
+```{r, echo=FALSE}
+
+# Removing lbissextile year records
+df2 <- df2 %>% 
+  filter(format(pickup_datetime,"%m-%d") != "02-29")
+
+#df_raw <- df_raw %>% 
+  #filter(year == 2012 & day_of_year > 59 ) %>% 
+  #mutate(day_of_year = day_of_year - 1)
+
+```
+
+Geographic coordinates of New York airports and neighborhoods
+
+```{r, echo=FALSE}
+
+nyc_airports <- list(JFK = list(min_lng = -73.8352,
+                min_lat= 40.6195,
+                max_lng = -73.7401,
+                max_lat = 40.6659),
+                EWR = list(min_lng = -74.1925,
+                min_lat= 40.6700,
+                max_lng = -74.1531,
+                max_lat = 40.7081),
+                LaGuardia = list(min_lng = -73.8895,
+                min_lat= 40.7664,
+                max_lng = -73.8550,
+                max_lat = 40.7931))
+
+
+
+nyc_boroughs <- list(manhattan = list(
+                min_lng = -74.0479,
+                min_lat= 40.6829,
+                max_lng = -73.9067,
+                max_lat = 40.8820),
+                
+                queens = list(
+                min_lng = -73.9630,
+                min_lat= 40.5431,
+                max_lng = -73.7004,
+                max_lat = 40.8007),
+                
+                brooklyn = list(
+                min_lng = -74.0421,
+                min_lat= 40.5707,
+                max_lng = -73.8334,
+                max_lat = 40.7395),
+                
+                bronx = list(
+                min_lng = -73.9339,
+                min_lat= 40.7855,
+                max_lng = -73.7654,
+                max_lat = 40.9176),
+                
+                staten_island = list(
+                min_lng = -74.2558,
+                min_lat= 40.4960,
+                max_lng = -74.0522,
+                max_lat = 40.6490))
+
+```
+
+
+
+```{r, echo= FALSE}
+
+# Extracting arrivals and departures from 3 New York airports
+df2 <- df2 %>% 
+  mutate(is_pickup_jfk = case_when(pickup_latitude >= nyc_airports[["JFK"]][["min_lat"]]                 & 
+                                    pickup_latitude <= nyc_airports[["JFK"]] [["max_lat"]]               & 
+                                    pickup_longitude >= nyc_airports[["JFK"]][["min_lng"]]               & 
+                                    pickup_longitude <= nyc_airports [["JFK"]] [["max_lng"]]             ~ "JFK" ,
+                                    TRUE ~ "others"),
+         
+         is_dropoff_jfk = case_when(dropoff_latitude >= nyc_airports[["JFK"]][["min_lat"]]               & 
+                                    dropoff_latitude <= nyc_airports[["JFK"]] [["max_lat"]]              & 
+                                    dropoff_longitude >= nyc_airports[["JFK"]][["min_lng"]]              & 
+                                    dropoff_longitude <= nyc_airports [["JFK"]] [["max_lng"]]            ~ "JFK" ,
+                                    TRUE ~ "others"),
+         
+         is_pickup_ewr = case_when(pickup_latitude >= nyc_airports[["EWR"]][["min_lat"]]                 & 
+                                    pickup_latitude <= nyc_airports[["EWR"]] [["max_lat"]]               & 
+                                    pickup_longitude >= nyc_airports[["EWR"]][["min_lng"]]               & 
+                                    pickup_longitude <= nyc_airports [["EWR"]] [["max_lng"]]             ~ "EWR" ,
+                                    TRUE ~ "others"),
+         
+         is_dropoff_ewr = case_when(dropoff_latitude >= nyc_airports[["EWR"]][["min_lat"]]               & 
+                                    dropoff_latitude <= nyc_airports[["EWR"]] [["max_lat"]]              & 
+                                    dropoff_longitude >= nyc_airports[["EWR"]][["min_lng"]]              & 
+                                    dropoff_longitude <= nyc_airports [["EWR"]] [["max_lng"]]            ~ "EWR" ,
+                                    TRUE ~ "others"),
+         
+         is_pickup_laguardia = case_when(pickup_latitude >= nyc_airports[["LaGuardia"]][["min_lat"]]     & 
+                                    pickup_latitude <= nyc_airports[["LaGuardia"]] [["max_lat"]]         & 
+                                    pickup_longitude >= nyc_airports[["LaGuardia"]][["min_lng"]]         & 
+                                    pickup_longitude <= nyc_airports [["LaGuardia"]] [["max_lng"]]       ~ "LaGuardia" ,
+                                    TRUE ~ "others"),
+         
+         is_dropoff_laguardia = case_when(dropoff_latitude >= nyc_airports[["LaGuardia"]][["min_lat"]]   & 
+                                    dropoff_latitude <= nyc_airports[["LaGuardia"]] [["max_lat"]]        & 
+                                    dropoff_longitude >= nyc_airports[["LaGuardia"]][["min_lng"]]        & 
+                                    dropoff_longitude <= nyc_airports [["LaGuardia"]] [["max_lng"]]      ~ "LaGuardia" ,
+                                    TRUE ~ "others")
+         
+         )
+
+```
+
+
+
+```{r, echo=FALSE}
+
+# Extracting pickup from New York neighborhoods
+df2 <- df2 %>% 
+  mutate(pickup_borough = case_when(pickup_latitude >= nyc_boroughs[["manhattan"]][["min_lat"]]     & 
+                                    pickup_latitude <= nyc_boroughs[["manhattan"]] [["max_lat"]]    & 
+                                    pickup_longitude >= nyc_boroughs[["manhattan"]][["min_lng"]]    & 
+                                    pickup_longitude <= nyc_boroughs [["manhattan"]] [["max_lng"]]  ~ "manhattan" ,
+                                    
+                                    pickup_latitude >= nyc_boroughs[["queens"]][["min_lat"]]     & 
+                                    pickup_latitude <= nyc_boroughs[["queens"]] [["max_lat"]]    & 
+                                    pickup_longitude >= nyc_boroughs[["queens"]][["min_lng"]]    & 
+                                    pickup_longitude <= nyc_boroughs [["queens"]] [["max_lng"]]  ~ "queens" ,
+                                    
+                                    pickup_latitude >= nyc_boroughs[["brooklyn"]][["min_lat"]]     & 
+                                    pickup_latitude <= nyc_boroughs[["brooklyn"]] [["max_lat"]]    & 
+                                    pickup_longitude >= nyc_boroughs[["brooklyn"]][["min_lng"]]    & 
+                                    pickup_longitude <= nyc_boroughs [["brooklyn"]] [["max_lng"]]  ~ "brooklyn" ,
+                                    
+                                    pickup_latitude >= nyc_boroughs[["bronx"]][["min_lat"]]     & 
+                                    pickup_latitude <= nyc_boroughs[["bronx"]] [["max_lat"]]    & 
+                                    pickup_longitude >= nyc_boroughs[["bronx"]][["min_lng"]]    & 
+                                    pickup_longitude <= nyc_boroughs [["bronx"]] [["max_lng"]]  ~ "bronx" ,
+                                    TRUE ~ "staten_island"))
+```
+
+
+```{r, echo=FALSE}
+
+# # Extracting dropoff from New York neighborhoods
+df2 <- df2 %>% 
+  mutate(dropoff_borough = case_when(
+                                    dropoff_latitude >= nyc_boroughs[["manhattan"]][["min_lat"]]     & 
+                                    dropoff_latitude <= nyc_boroughs[["manhattan"]] [["max_lat"]]    & 
+                                    dropoff_longitude >= nyc_boroughs[["manhattan"]][["min_lng"]]    & 
+                                    dropoff_longitude <= nyc_boroughs [["manhattan"]] [["max_lng"]]  ~ "manhattan" ,
+                                    
+                                    dropoff_latitude >= nyc_boroughs[["queens"]][["min_lat"]]     & 
+                                    dropoff_latitude <= nyc_boroughs[["queens"]] [["max_lat"]]    & 
+                                    dropoff_longitude >= nyc_boroughs[["queens"]][["min_lng"]]    & 
+                                    dropoff_longitude <= nyc_boroughs [["queens"]] [["max_lng"]]  ~ "queens" ,
+                                    
+                                    dropoff_latitude >= nyc_boroughs[["brooklyn"]][["min_lat"]]     & 
+                                    dropoff_latitude <= nyc_boroughs[["brooklyn"]] [["max_lat"]]    & 
+                                    dropoff_longitude >= nyc_boroughs[["brooklyn"]][["min_lng"]]    & 
+                                    dropoff_longitude <= nyc_boroughs [["brooklyn"]] [["max_lng"]]  ~ "brooklyn" ,
+                                    
+                                    dropoff_latitude >= nyc_boroughs[["bronx"]][["min_lat"]]     & 
+                                    dropoff_latitude <= nyc_boroughs[["bronx"]] [["max_lat"]]    & 
+                                    dropoff_longitude >= nyc_boroughs[["bronx"]][["min_lng"]]    & 
+                                    dropoff_longitude <= nyc_boroughs [["bronx"]] [["max_lng"]]  ~ "bronx" ,
+                                    TRUE ~ "staten_island"))
+```
+
+```{r, echo=FALSE}
+
+# Extracting rush hours
+df2 <- df2 %>% 
+  mutate(rush_hour = case_when(hour_of_day >= 7 & hour_of_day <= 9 ~ "rush_hour_morning",
+                               hour_of_day >= 16 & hour_of_day <= 18 ~ "rush_hour_afternoon",
+                               TRUE ~ "normal_hours"))
+
+```
+
+
+# Data Preparation
+
+```{r, echo=FALSE}
+df3 <- df2
+# Remove picup_datetime
+df3 <- 
+  df2 %>%
+  mutate(days_of_week = wday(pickup_datetime),
+  month_fare = month(pickup_datetime)) %>% 
+  select(-pickup_datetime)
+
+```
+
+
+
+## Rescaling
+
+Colocando os dados na mesma escala:    
+Placing the data on the same scale:    
+
+1. **pickup_longitude**
+    * Não possui uma distribuição normal e também e possui outliers , então usarei a tecnica robustscaler.    
+    * It does not have a normal distribution and also has outliers, so I will use the robustscaler technique.    
+
+2. **pickup_latitude**
+    * Não possui uma distribuição normal e também e possui outliers , então usarei a tecnica robustscaler.  
+    * It does not have a normal distribution and also has outliers, so I will use the robustscaler technique.  
+
+3. **dropoff_longitude**
+    * Não possui uma distribuição normal e também e possui outliers , então usarei a tecnica robustscaler.  
+    * It does not have a normal distribution and also has outliers, so I will use the robustscaler technique.    
+
+4. **dropoff_latitude**
+    * Não possui uma distribuição normal e também e possui outliers , então usarei a tecnica robustscaler.  
+    * It does not have a normal distribution and also has outliers, so I will use the robustscaler technique.   
+    
+5. **passenger_count**
+    * Não possui uma distribuição normal e também e possui outliers , então usarei a tecnica robustscaler.  
+    * It does not have a normal distribution and also has outliers, so I will use the robustscaler technique.    
+
+6. **year**
+    * Não possui uma distribuição normal e nem possui outliers , então usarei a tecnica min-max scaler.    
+    * It does not have a normal distribution or outliers, so I will use the min-max scaler technique.   
+
+7. **travelled_distance_km**
+    * Não possui uma distribuição normal e também e possui outliers , então usarei a tecnica robustscaler.  
+    * It does not have a normal distribution and also has outliers, so I will use the robustscaler technique.   
+    
+
+
+Frequência das variaveis categoricas.  
+Frequency of categorical variables.  
+
+```{r, echo=FALSE}
+
+df3 <- df3 %>% 
+  mutate(pickup_longitude = robust_scaler(pickup_longitude),
+         pickup_latitude= robust_scaler(pickup_latitude),
+         dropoff_longitude = robust_scaler(dropoff_longitude),
+         dropoff_latitude = robust_scaler(dropoff_latitude),
+         year = minmax_scaler(year),
+         day = minmax_scaler(day),
+         travelled_distance_km = robust_scaler(travelled_distance_km),
+         passenger_count = robust_scaler(passenger_count))
+
+df3 <- df3 %>% 
+  mutate(is_pickup_jfk = as_factor(is_pickup_jfk),
+         is_pickup_ewr = as_factor(is_pickup_ewr),
+         is_pickup_laguardia = as_factor(is_pickup_laguardia),
+         
+         is_dropoff_jfk = as_factor(is_dropoff_jfk),
+         is_dropoff_ewr = as_factor(is_dropoff_ewr),
+         is_dropoff_laguardia = as_factor(is_dropoff_laguardia),
+         
+         pickup_borough = as_factor(pickup_borough),
+         dropoff_borough = as_factor(dropoff_borough),
+         rush_hour = as_factor(rush_hour))
+
+df3 %>% 
+  keep(is.factor) %>% 
+  summary() 
+  
+```
+
+
+## Transformation
+
+### Encoding
+
+- **is_pickup_jfk**        target encoder
+- **is_dropoff_jfk**       target encoder
+- **is_pickup_ewr**        target encoder
+- **is_dropoff_ewr**       target encoder
+- **is_pickup_laguardia**  target encoder
+- **is_dropoff_laguardia** target encoder
+- **pickup_borough**       target encoder
+- **dropoff_borough**      target encoder
+- **rush_hour**            target encoder
+
+
+```{r, echo=FALSE}
+
+df3 <- df3 %>% 
+  mutate(is_pickup_jfk = encode_target(is_pickup_jfk, fare_amount),
+         is_dropoff_jfk = encode_target(is_dropoff_jfk, fare_amount),
+         
+         is_pickup_ewr = encode_target(is_pickup_ewr, fare_amount),
+         is_dropoff_ewr = encode_target(is_dropoff_ewr, fare_amount),
+         
+         is_pickup_laguardia = encode_target(is_pickup_laguardia, fare_amount),
+         is_dropoff_laguardia = encode_target(is_dropoff_laguardia, fare_amount),
+         
+         pickup_borough_encoder = encode_target(pickup_borough, fare_amount),
+         
+         dropoff_borough = encode_target(dropoff_borough, fare_amount),
+         rush_hour = encode_target(rush_hour, fare_amount))
+
+
+
+```
+
+
+Resultado do Encoding:
+Encoding result:
+
+```{r, echo=FALSE}
+
+df3 %>% 
+  head() %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"),html_font = "Cambria")
+```
+
+
+### Response Variable Transformation
+
+Resultado da transformação logarítmica na variavel target.  
+Result of logarithmic transformation in the target variable.  
+
+```{r,echo=FALSE}
+
+df3 <- df3 %>% 
+  mutate(fare_amount = log1p(fare_amount))
+
+df3 %>% 
+  ggplot(aes(fare_amount))+
+  geom_histogram(aes(y =..density..),col="black", fill="darkcyan")+
+  stat_function(fun = dnorm, args = list(mean = mean(df3$fare_amount), sd = sd(df3$fare_amount)), col="red", lwd=1)
+```
+
+
+### Nature Transformation
+
+```{r,echo=FALSE}
+
+df3 <- df3 %>% 
+  mutate(day_of_week_sin = round(sin(days_of_week*(2. * pi/7)),2),
+         day_of_week_cos = round(cos(days_of_week*(2. * pi/7)),2),
+         month_sin = round(sin(month_fare*(2. * pi/12)),2),
+         month_cos = round(cos(month_fare*(2. * pi/12)),2),
+         hour_sin = round(sin(hour_of_day*(2. * pi/24)),2),
+         hour_cos = round(cos(hour_of_day*(2. * pi/24)),2),
+         day_of_year_sin = round(sin(day_of_year*(2. * pi/365)),2),
+         day_of_year_cos = round(cos(day_of_year*(2. * pi/365)),2),
+        )
+
+df3 <- df3 %>% 
+  select(- days_of_week, -month_fare, - day_of_year, -hour_of_day)
+
+kable(head(df3), caption = "Tabela com as transformações de natureza / Table with nature transformations ") %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"),html_font = "Cambria")
+```
+
+# Feature Selection
+
+## Selection with Boruta
+
+```{r, echo=FALSE}
+
+#set.seed(1234)
+
+#boruta_features <- Boruta(fare_amount ~ ., data= df3 ,doTrace= 2)
+
+```
+
+- Boruta performed 11 iterations in 10.62185 hours.  
+- 15 attributes confirmed important: day_of_week_cos, day_of_week_sin, day_of_year_cos, day_of_year_sin, dropoff_latitude and 10 more.  
+- No attributes deemed unimportant.  
+
+```{r, echo=FALSE}
+
+#boruta.select.features <- getSelectedAttributes(boruta_features, withTentative = F)
+
+#saveRDS(boruta.select.features,"boruta/boruta.select.features.rds")
+
+#boruta.selected.features.stats <- attStats(boruta_features)
+
+#saveRDS(boruta.selected.features.stats,"boruta/boruta.selected.features.stats.rds")
+
+```
+
+Features selecionadas pelo boruta.  
+Features selected by boruta.  
+
+```{r, echo=FALSE, comment=""}
+
+boruta.select.features <- readRDS("boruta/boruta.select.features.rds")
+boruta.select.features
+
+```
+
+
+```{r, echo=FALSE, comment=""}
+
+boruta.selected.features.stats <- readRDS("boruta/boruta.selected.features.stats.rds")
+
+kable(boruta.selected.features.stats, caption = "Tabela com valores de importância das features / Table with values of importance of features ")%>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+
+```{r, echo=FALSE}
+write.csv(df2,"Data/Data_Wrangling.csv",row.names = F)
+```
+

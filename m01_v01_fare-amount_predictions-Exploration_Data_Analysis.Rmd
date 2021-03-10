@@ -1,0 +1,532 @@
+---
+title: "m01_v01_fare-amount_predictions_Exploration_Data_Analysis"
+author: "Data Science in Foco"
+date: "08/11/2020"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, fig.width = 13, fig.height = 6)
+```
+
+# Importing Needed packages
+
+
+```{r ,echo=FALSE}
+
+library(tidyverse)
+library(ggcorrplot)
+library(kableExtra)
+library(htmltools)
+library(e1071)
+library(gridExtra)
+library(tidymodels)
+library(Boruta)
+library(lubridate)
+library(geosphere)
+library(leaflet)
+library(ggmap)
+library(ggpubr)
+library(ggcorrplot)
+library(reshape2)
+library(vcd)
+
+```
+
+# Helper Function
+
+```{r, echo=FALSE}
+catcor <- function(x, type=c("cramer", "phi", "contingency")) {
+	require(vcd)
+	nc <- ncol(x)
+	v <- expand.grid(1:nc, 1:nc)
+	type <- match.arg(type)
+	res <- matrix(mapply(function(i1, i2) assocstats(table(x[,i1],
+		x[,i2]))[[type]], v[,1], v[,2]), nc, nc)
+	rownames(res) <- colnames(res) <- colnames(x)
+	res
+}
+```
+
+
+## Reading the data
+
+```{r, Loading DataSet, echo=FALSE}
+
+df_raw <- read.csv("Data/Data_Wrangling.csv",stringsAsFactors = T)
+
+knitr::kable(head(df_raw),caption = "Data / Dados") %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"),html_font = "Cambria")
+
+```
+
+# Descricption of Data
+
+
+## Data Dimensions
+
+```{r, echo=FALSE, comment=""}
+
+print(paste(  "this is data set has:", nrow(df_raw), "rows and:",ncol(df_raw), "columns"))
+
+```
+
+## Data Types
+
+```{r, echo=FALSE, comment=""}
+df_raw <- df_raw %>% 
+  mutate(pickup_datetime = ymd_hms(pickup_datetime))
+
+glimpse(df_raw)
+
+```
+
+
+
+
+# Exploration Data Analysis
+
+## Univariate Analysis
+
+### Variable Response
+
+```{r, echo=FALSE, fig.width=13}
+
+hist_fare <- df_raw %>% 
+  ggplot(aes(fare_amount))+
+  geom_histogram(aes(y =..density..),col="black", fill="steelblue")+
+  stat_function(fun = dnorm, args = list(mean = mean(df_raw$fare_amount), sd = sd(df_raw$fare_amount)), col="red", lwd=1)
+
+dist_fare <- df_raw %>% 
+  ggplot(aes(log(fare_amount)))+
+  geom_density(fill="steelblue",alpha=0.2, col="steelblue")
+
+grid.arrange(hist_fare, dist_fare, ncol=2)
+
+```
+
+- **fare_amount** Possui uma skew mais a direita, com valores entre 2,5 dolares a 148 dolares e uma média de 11 dolares.  
+- **fare_amount** It has a skew more to the right, with values between 2.5 dollars to 148 dollars and an average of 11 dollars.
+
+### Numerical Variables
+
+```{r, echo=FALSE}
+
+df_raw %>%
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+    facet_wrap(~ key, scales = "free") +
+    geom_histogram(col= "black", fill="steelblue", bins = 25)+
+    scale_y_continuous(labels = function(x) format(x, scientific = FALSE))
+
+```
+
+
+
+Conclusões:  
+Conclusions:  
+
+- **day_of_year** Conforme esperado no primeiro dia e o ultimo dia do ano o numero de corridas cai.  
+- **day_of_year** As expected on the first day and the last day of the year the number of races drops.  
+
+- **fare_amount** A maior concentração dos valores esta próxima de 2,5 dolares e 60 dolares.  
+- **fare_amount** The highest concentration of values is close to 2.5 dollars and 60 dollars.  
+
+
+- **hour_of_day** Apartir da 01 hora da madrugada as corridas caem so voltando apartir das 06 horas da manhã. 
+- **hour_of_day** Starting at 1 am the races fall only after returning from 6 am.  
+
+- **passenger_count** A maioria das corridas feitas são com 1 passageiro.  
+- **passenger_count** Most runs are made with 1 passenger.  
+
+
+- **travelled_distance_km** A maioria das corridas estão range de 3 a 20km, tendo uma distância máxima de 57km.  
+- **travelled_distance_km** Most races range from 3 to 20km, with a maximum distance of 57km.  
+
+  
+
+
+## Pickup
+
+```{r,echo=FALSE}
+
+#map_pickup <- df_raw %>% 
+#  leaflet() %>% 
+#  addTiles() %>% 
+#  setView(-73.98, 40.75, zoom = 11) %>% addCircles(lng = ~pickup_longitude,lat = ~pickup_latitude,  weight = 3, radius=0.1, 
+#                 color="darkblue", stroke = F, fillOpacity = 0.2) 
+
+knitr::include_graphics("img/map_pickup.png")
+```
+
+## Dropoof
+
+```{r, echo=FALSE}
+
+#map_dropoff <- df_raw %>% 
+#  leaflet() %>% 
+#  addTiles() %>% 
+#  setView(-73.98, 40.75, zoom = 11) %>% addCircles(lng = ~dropoff_longitude,lat = ~dropoff_latitude,  weight = 3, radius=0.1, 
+#                 color="darkgreen", stroke = F, fillOpacity = 0.2) 
+
+knitr::include_graphics("img/map_dropoff.png")
+```
+
+Além de Manhattan, podemos ver muitos embarques e desembarks perto do JFK e do Aeroporto Laguardia.
+Apart from Manhattan, we can see heavy pickups and dropoffs near JFK and Laguardia Airport.
+
+
+### Categorical Variables
+
+```{r, echo=FALSE}
+
+order_day <- c("seg","ter","qua","qui","sex","sáb","dom")
+
+fig.1 <- df_raw %>% 
+  keep(is.factor) %>%
+  mutate(days_of_week = factor(days_of_week, levels = order_day)) %>% 
+  ggplot(aes(days_of_week, fill=days_of_week))+
+  geom_bar(col="black")
+
+fig.2 <- df_raw %>% 
+  mutate(days_of_week = factor(days_of_week, levels = order_day)) %>% 
+  ggplot(aes(fare_amount, fill= days_of_week))+
+  geom_density(alpha= 0.5)
+
+order_month <- c("jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez")
+fig.3 <- df_raw %>% 
+  mutate(month_fare = factor(month_fare, levels = order_month)) %>%
+  ggplot(aes(month_fare, fill=month_fare))+
+  geom_bar(col="black")
+
+fig.4 <- df_raw %>% 
+  mutate(month_fare = factor(month_fare, levels = order_month)) %>%
+  ggplot(aes(fare_amount, fill= month_fare))+
+  geom_density(alpha= 0.3)
+
+grid.arrange(fig.1,fig.2,fig.3,fig.4, nrow=2)
+
+```
+Conclusões:  
+Conclusions: 
+
+- **days_of_week** Aos domingos e segundas feiras são os dias da semana onde número de corridas é menor. 
+- **days_of_week** Sundays and Mondays are the days of the week where the number of runs is less.  
+
+
+- **month_fare** O número de corridas apartir de julho é menor que os meses anteriores. 
+- **month_fare** The number of races starting in July is less than the previous months.  
+
+## Bivariate Analysis
+
+
+```{r, echo=FALSE}
+
+year_avg_fare <- df_raw %>% 
+  group_by(year) %>% 
+  summarise(avg_fare = mean(fare_amount)) %>% 
+  mutate(year = as_factor(year)) %>% 
+  ggplot(aes(year, avg_fare, fill=year))+
+  geom_bar(stat = "identity", col="black")+
+  ggtitle("Year per Avg Fare")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+month_avg_fare <- df_raw %>% 
+  group_by(month_fare) %>% 
+  summarise(avg_fare = mean(fare_amount)) %>% 
+  mutate(month = as_factor(month_fare),month= factor(month_fare, levels = order_month)) %>% 
+  ggplot(aes(month, avg_fare, fill=month))+
+  geom_bar(stat = "identity", col="black")+
+  ggtitle("Month per Avg Fare")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(year_avg_fare, month_avg_fare, ncol=2)
+```
+
+Conclusões:  
+Conclusions:
+
+
+- **year** Ao longo dos anos a tarifa média de táxi aumentou.     
+- **year** Over the years the average taxi fare has increased.   
+
+- **month** Tarifa média tem um crescimento até mês de junho , com uma leve caida nos meses de julho a agosto, passando a ser constante nos 3 ultimos meses do ano.     
+- **month** Average tariff increases until June, with a slight drop in the months from July to August, becoming constant in the last 3 months of the year.  
+
+
+
+**H1.** Corridas com maiores distâncias deveriam ter tarifas maiores. 
+**Verdadeira** Pois embarques com destino ao aeroporto JFK tem valores mais altos que dentro da cidade.  
+**H1.** Longer runs should have higher fares.  
+**True** Because pickups to JFK airport have higher values than within the city.   
+
+```{r, echo=FALSE}
+
+# Filtering JFK airport pickups
+jfk_pickup <- df_raw %>% 
+  filter(pickup_latitude >= 40.6195 & pickup_longitude <= 40.6659) %>% 
+  filter(pickup_longitude >= -73.8352 & pickup_longitude <= -73.7401)
+
+# Filtering JFK airport dropoff
+jfk_dropoff <- df_raw %>% 
+  filter(dropoff_latitude >= 40.6195 & dropoff_longitude <= 40.6659) %>% 
+  filter(dropoff_longitude >= -73.8352 & dropoff_longitude <= -73.7401)
+
+# Scatter Plot Fare amount vs Travelled distance km
+fare_distance <- df_raw %>% 
+  filter(travelled_distance_km != 0) %>% 
+  ggplot(aes(travelled_distance_km, fare_amount))+
+  geom_point(shape=21, fill="steelblue",alpha=0.2)+
+  scale_y_continuous(breaks = seq(0,150,5))+
+  scale_x_continuous(breaks = seq(0,80,5))+
+  geom_smooth(formula = y ~ x, method = lm, col="red")+
+  ggtitle("Fare amount vs Travelled_distance_km")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Distibution of pickups in JFK vs Fare amount
+fig.dist_pickup <- jfk_pickup %>%
+  ggplot(aes(log( fare_amount)))+
+  geom_density(aes(fill="jfk"), lwd=1, alpha=0.2)+
+  geom_density(data = df_raw,aes(log(fare_amount),fill="All Trips in Train data"), alpha=0.2)+
+  ggtitle("Fare amount vs Pickup")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(fare_distance, fig.dist_pickup, ncol=2)
+```
+
+```{r, echo=FALSE}
+cor(df_raw$travelled_distance_km, df_raw$fare_amount)
+```
+
+### Temporal Hypotheses
+
+**H2.** O número de corridas na madrugada deve ser menor.  
+**Verdadeira** as corridas na madrugada são menores , apartir da 01 hora em diante, voltando a crescer somente apartir das 06 horas da manhã.  
+**H2.** The number of runs at dawn should be less.    
+**True** the morning runs are shorter, from 1 am onwards, growing again only after 6 am.    
+
+```{r, echo=FALSE, fig.width=13}
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+number_of_hour <- df_raw %>% 
+  ggplot(aes(hour_of_day))+
+  geom_histogram(bins = 24, col="black", fill= "steelblue")+
+  scale_x_continuous(breaks = seq(0,23,1))+
+  scale_y_continuous(breaks = seq(0,15000,2000))+
+  ggtitle("Number of trips per hour")+
+  theme(plot.title = element_text(hjust = 0.5))
+  
+hour_mean_fare <- df_raw %>% 
+  group_by(hour_of_day) %>% 
+  summarise(mean_fare = round( mean(fare_amount), 2)) %>% 
+  ggplot(aes(hour_of_day, mean_fare, fill=hour_of_day))+
+  geom_bar(stat = "identity",col="black")+
+  scale_x_continuous(breaks = seq(0,23,1))+
+  ggtitle("Number of trips per Agv Fare")+
+  theme(plot.title = element_text(hjust = 0.5))
+  
+
+grid.arrange(number_of_hour, hour_mean_fare, ncol=2)
+```
+
+**H3** Aos finais de semana o número de corridas deveria ser maior. 
+**Falsa** Aos finais de semana o número de corridas cai apartir de sábado, so voltando a crescer apartir de terça feira.  
+**H3** On weekends the number of runs should be higher.   
+**False** On weekends the number of races falls from Saturday, only increasing again from Tuesday.  
+
+```{r, echo=FALSE}
+
+days_of_week_count <- df_raw %>% 
+  keep(is.factor) %>%
+  mutate(days_of_week = factor(days_of_week, levels = order_day)) %>% 
+  ggplot(aes(days_of_week, fill=days_of_week))+
+  geom_bar(col="black")+
+  ggtitle("Number of trips per Day of Week")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+days_of_week_mean_fare <- df_raw %>% 
+  group_by(days_of_week) %>% 
+  summarise(mean_fare = round( mean(fare_amount), 2)) %>% 
+  mutate(days_of_week = factor(days_of_week, levels = order_day)) %>% 
+  ggplot(aes(days_of_week, mean_fare, fill=days_of_week))+
+  geom_bar(stat = "identity",col="black")+
+  ggtitle("Day of Week per Avg Fare")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(days_of_week_count, days_of_week_mean_fare, ncol=2)
+
+```
+
+**H4** Nas férias escolares , Natal e Ano novo , o faturamento deve ser menor.  
+**Verdadeira** Nos meses de janeiro, julho e dezembro o faturamento é menor.  
+**H4** In school holidays, Christmas and New Year, the revenue should be lower.        
+**True** In January, July and December the revenue is lower.  
+
+```{r,echo=FALSE}
+
+fig.3 <- df_raw %>% 
+  mutate(month_fare = factor(month_fare, levels = order_month)) %>%
+  ggplot(aes(month_fare, fill=month_fare))+
+  geom_bar(col="black")
+
+
+
+month_avg_fare <- df_raw %>% 
+  group_by(month_fare) %>% 
+  summarise(avg_fare = mean(fare_amount)) %>% 
+  mutate(month = as_factor(month_fare),month= factor(month_fare, levels = order_month)) %>% 
+  ggplot(aes(month, avg_fare, fill=month))+
+  geom_bar(stat = "identity", col="black")+
+  ggtitle("Month per Avg Fare")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(fig.3, month_avg_fare, ncol=2)
+
+```
+
+
+**H5** As viagens de / para o aeroporto geralmente têm uma tarifa fixa.      
+**Falsa** Podemos ver que fare_amount tem uma distribuição maior  tanto no embarque quanto no desembarque de passageiros no aeroporto JFK.      
+**H5** Trips to/from airport generally have a fixed fare.           
+**False** We can see that fare_amount has a greater distribution both for passenger pickup and dropoff at JFK airport.  
+
+```{r, echo=FALSE}
+
+fig.dist_pickup <- jfk_pickup %>%
+  ggplot(aes(log( fare_amount)))+
+  geom_density(aes(fill="jfk"), lwd=1, alpha=0.2)+
+  geom_density(data = df_raw,aes(log(fare_amount),fill="All Trips in Train data"), alpha=0.2)+
+  ggtitle("Fare amount vs Pickup")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+fig.dist_dropoff <- jfk_dropoff %>% 
+  ggplot(aes(log( fare_amount)))+
+  geom_density(aes(fill="jfk"), lwd=1, alpha=0.2)+
+  geom_density(data = df_raw,aes(log(fare_amount), fill="All Trips in Train data"), alpha=0.2)+
+  ggtitle("Fare amount vs Dropoff")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(fig.dist_pickup, fig.dist_dropoff, ncol=2)
+
+```
+ 
+  
+**H6** A tarifa pode ser diferente dependendo do tipo de bairro.        
+**Verdadeira** A uma diferença na distribuição de tarifas de taxi de embarque e desembarque, dependendo do bairro.  
+               Além disso, o Bronx teve uma tarifa média de recolhimento mais alta em comparação com outros bairros.   
+
+**H6** The fare may differ depending on the type of neighborhood.           
+**True**  A difference in the distribution of taxi fares for boarding and disembarking, depending on the neighborhood.  
+          In addition, the Bronx had a higher average pickup rate compared to other neighborhoods.
+
+```{r, echo=FALSE, fig.height= 10}
+
+bar_borough <- df_raw %>% 
+  ggplot(aes(pickup_borough, fill=pickup_borough)) +
+  geom_bar()+
+  coord_flip()+
+  theme(legend.position = "none")+
+  ggtitle("Number of Pickup by Neighborhood")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+dist_borough <- df_raw %>% 
+  select(pickup_borough, dropoff_borough, fare_amount) %>% 
+  gather(pickup_borough, dropoff_borough, -fare_amount) %>% 
+  ggplot(aes(log(fare_amount), fill = pickup_borough)) + 
+  geom_density(alpha = 0.2)+
+  facet_wrap(~dropoff_borough)+
+  ggtitle("Fare amount by Pickup Neighborhood / Dropoff Neighborhood")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+grid.arrange(bar_borough, dist_borough, nrow=2)
+
+```
+
+
+
+**H7** Viagens no horario de pico , as tarifas deveriam ser mais altas.    
+**Verdadeira** Viagens nos horários de pico são mais caras , principalmente na parte da tarde.  
+
+**H7** At peak travel times, fares should be higher.  
+**True** Peak travel times are more expensive, especially in the afternoon.  
+
+
+```{r, echo=FALSE}
+
+bar_rush <- df_raw %>% 
+  filter(rush_hour != "normal_hours") %>%
+  mutate(rush_hour = as_factor(rush_hour)) %>% 
+  ggplot(aes(rush_hour, fill= rush_hour))+
+  geom_histogram(bins = 25,stat = "count", col="black")+
+  theme(legend.position = "none")+
+  ggtitle("Numbers of Trip vs Rush Hour")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+dist_rush <- df_raw %>% 
+  ggplot(aes(log( fare_amount), fill=rush_hour))+
+  geom_density( alpha=0.2)+
+  ggtitle("Fare amount vs Rush Hour")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(bar_rush, dist_rush, ncol=2)
+```
+
+
+### Summary of Hypotheses
+
+```{r, echo=FALSE}
+
+kable(data.frame( Hypotheses = c("H1","H2","H3","H4","H5","H6","H7")  , 
+                  Conclusions = c("True","True","False","True", "False","True","True") , 
+                Relevance = c("Medium","Low","Low","High","Medium","Low","Low") )) %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend"),html_font = "Cambria")
+
+```
+
+
+## Multivariate Analysis
+
+### Numerical Attributes
+
+```{r, echo=FALSE}
+
+df_raw %>% 
+  keep(is.numeric) %>% 
+  cor() %>% 
+  ggcorrplot(hc.order = T,
+             type = "lower",
+             lab=T,
+             lab_size = 3,
+             method = "square",
+             colors = c("chocolate1","white","darkcyan"),
+             ggtheme = theme_minimal())
+
+```
+
+### Categorical Attributes
+
+```{r, echo=FALSE}
+df_raw %>% 
+  keep(is.factor) %>% 
+  catcor(type="cramer") %>% 
+  ggcorrplot(hc.order = T,
+             type = "lower",
+             lab=T,
+             lab_size = 3,
+             method = "square",
+             colors = c("chocolate1","white","steelblue"),
+             ggtheme = theme_minimal())
+```
+
+

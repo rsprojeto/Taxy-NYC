@@ -1,0 +1,548 @@
+---
+title: "m01_v01_fare-amount_predictions_Modelling"
+author: "Data Science in Foco"
+date: "08/11/2020"
+output: 
+    html_document:
+        number_sections: true
+        toc: TRUE
+        toc_float: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE ,message = F, warning = F, fig.width = 13, fig.height = 6, comment = "")
+```
+
+# Importing Needed packages
+
+```{r, echo=FALSE}
+
+library(tidyverse)
+library(tidymodels)
+library(data.table)
+library(kableExtra)
+library(htmltools)
+library(Metrics)
+library(doParallel)
+
+
+```
+
+## Helper Functions
+
+```{r}
+
+ml_error <-  function(model_name = "Linear Regression Model",model_predictions){
+  MAE <- model_predictions %>%
+    yardstick::mae(actual, predictions)
+
+  MAPE <- lm_pred %>%
+    yardstick::mape(actual, predictions)
+
+  RMSE <- lm_pred %>%
+    yardstick::rmse(actual, predictions)
+
+  data.frame(Model_Name = model_name, MAE= round(MAE$.estimate,3), MAPE = round(MAPE$.estimate,3), RMSE = round(RMSE$.estimate, 3))  
+  
+} 
+
+
+ml_error_cv <- function(model_name = "Linear Regression Model", cv ){
+  
+  metricas <- collect_metrics(cv) %>% 
+    select(.metric, mean, std_err) 
+  
+  data.frame(Model_Name = model_name, MAE_CV = paste0(round( metricas$mean [1],2) , " +- " ,round( metricas$std_err[1], 2)),
+                                                   MAPE_CV = paste0(round( metricas$mean[2],2) , " +- " ,round( metricas$std_err[2],2)),
+                                                   RMSE_CV = paste0(round( metricas$mean[3],2) , " +- " ,round( metricas$std_err[3],2))) 
+  
+}
+
+```
+
+
+## Reading the data
+
+```{r}
+
+df4 <- data.table::fread("Data/Machine_Learning.csv",stringsAsFactors = T, encoding = "UTF-8")
+
+kable(head(df4)) %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"),html_font = "Cambria")
+```
+
+# Machine Learning Modelling
+
+## Split data Train and Test
+
+```{r}
+
+df4 <- df4 %>% 
+  mutate(fare_amount = expm1(fare_amount))
+
+data_split <- initial_split(df4, prop = 0.15 ,strata = fare_amount)
+data_train <- training(data_split)
+data_test  <- testing(data_split)
+
+rec <- recipe(fare_amount~.,data_train) %>% 
+  step_rm(pickup_borough)
+
+cv <- vfold_cv(data_train)
+
+mt <- metric_set(yardstick::rmse, yardstick::mae, yardstick::mape)
+
+```
+
+
+## Average Model
+
+```{r}
+
+y_test <- data_test$fare_amount
+yhat_baseline <- round(mean(y_test),2)
+
+
+metrics_avg <- data.frame(Model_name = "Average Model", MAE=mae(y_test, yhat_baseline), MAPE= mape(y_test, yhat_baseline),RMSE = rmse(y_test, yhat_baseline) ) 
+
+metrics_avg %>% kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+## Linear Regression Model
+
+```{r}
+
+# Create Model
+lm <-
+  linear_reg() %>% 
+  set_engine("lm") %>% 
+  set_mode("regression")
+
+# Training Model
+lm_fit <- lm %>%
+  fit(fare_amount ~ ., data = data_train)
+
+# Preditions
+lm_pred <- lm_fit %>% 
+  predict(data_test) %>% 
+  bind_cols(data_test$fare_amount) %>% 
+  rename(predictions = ".pred", actual = "...2")
+  
+# Evaluate
+lm_result <- ml_error("Linear Regression Model",lm_pred)  
+
+lm_result %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+## Linear Regression Model - Cross Validation
+
+```{r}
+
+# Create Workflow
+lm_wf <- 
+  workflow() %>% 
+  add_model(lm) %>% 
+  add_recipe(rec)
+
+# Evaluate Cross validation
+lm_cv <- 
+  fit_resamples(lm_wf,
+                resamples = cv,metrics = mt, control = control_resamples(save_pred = TRUE))
+
+
+lm_result_cv <- ml_error_cv("Linear Regression Model", lm_cv)
+
+lm_result_cv %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+
+## Random Forest Model 
+
+```{r}
+
+# Create Model
+rf <-
+  rand_forest(trees = 1000) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+# Training Model
+#rf_fit <- rf %>%
+  #fit(fare_amount ~ ., data = data_train)
+
+#saveRDS(rf_fit,"Metricas/rf_fit.rds")
+rf_fit <- readRDS("Metricas/rf_fit.rds")
+
+# Preditions
+#rf_pred <- rf_fit %>% 
+  #predict(data_test) %>% 
+  #bind_cols(data_test$fare_amount) %>% 
+  #rename(predictions = ".pred", actual = "...2")
+
+#saveRDS(rf_pred,"Metricas/rf_pred.rds")
+rf_pred <- readRDS("Metricas/rf_pred.rds")
+  
+# Evaluate
+rf_result <- ml_error("Random Forest Model",rf_pred)  
+
+rf_result %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+## Random Forest Model - Cross Validation
+
+```{r}
+
+# Create Workflow
+rf_wf <- 
+  workflow() %>% 
+  add_model(rf) %>% 
+  add_recipe(rec)
+
+# Evaluate Cross validation
+#rf_cv <- 
+  #fit_resamples(rf_wf,
+                #resamples = cv,metrics = mt, control = control_resamples(save_pred = TRUE))
+
+#saveRDS(rf_cv,"Metricas/rf_cv.rds")
+rf_cv <- readRDS("Metricas/rf_cv.rds")
+
+rf_result_cv <- ml_error_cv("Random Forest Model", rf_cv)
+
+rf_result_cv %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+
+## Xgboosting Model 
+
+```{r}
+
+# Create Model
+xg <-
+  boost_tree(trees = 1000) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+# Training Model
+#xg_fit <- xg %>%
+  #fit(fare_amount ~ ., data = data_train)
+
+#saveRDS(xg_fit,"Metricas/xg_fit.rds")
+xg_fit <- readRDS("Metricas/xg_fit.rds")
+
+# Preditions
+#xg_pred <- xg_fit %>% 
+  #predict(data_test) %>% 
+  #bind_cols(data_test$fare_amount) %>% 
+  #rename(predictions = ".pred", actual = "...2")
+
+#saveRDS(xg_pred,"Metricas/xg_pred.rds")
+xg_pred <- readRDS("Metricas/xg_pred.rds")
+  
+# Evaluate
+xg_result <- ml_error("Xgboosting Model",xg_pred)  
+
+xg_result %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+## Xgboosting Model -  Cross Validation
+
+```{r}
+
+# Create Workflow
+xg_wf <- 
+  workflow() %>% 
+  add_model(xg) %>% 
+  add_recipe(rec)
+
+# Evaluate Cross validation
+#xg_cv <- 
+  #fit_resamples(xg_wf,
+                #resamples = cv,metrics = mt, control = control_resamples(save_pred = TRUE))
+
+#saveRDS(xg_cv,"Metricas/xg_cv.rds")
+xg_cv <- readRDS("Metricas/xg_cv.rds")
+
+xg_result_cv <- ml_error_cv("Xgboosting Model", xg_cv)
+
+xg_result_cv %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+## Single Performance Comparison 
+
+```{r}
+
+bind_rows(lm_result , rf_result , xg_result) %>% 
+  arrange(RMSE) %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+
+
+## Real Performance Comparison Cross Validation
+
+```{r}
+
+bind_rows( lm_result_cv , rf_result_cv , xg_result_cv) %>% 
+  arrange(RMSE_CV) %>% 
+  kable() %>% 
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condesend", "responsive"), html_font = "Cambria")
+
+```
+
+
+# HYPERPARAMETER FINE TUNING
+
+```{r, fig.height= 10}
+
+xgb_spec <- boost_tree(
+  trees = tune(), 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     
+  sample_size = tune(), mtry = tune(),         
+  learn_rate = tune(),                         
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+
+xgb_grid <- grid_latin_hypercube(trees(),
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), data_train),
+  learn_rate(),
+  size = 30
+)
+
+
+xgb_wf <- workflow() %>%
+  add_formula(fare_amount ~ .) %>%
+  add_model(xgb_spec)
+
+
+#doParallel::registerDoParallel()
+
+#set.seed(234)
+#xgb_res <- tune_grid(
+#  xgb_wf,
+#  resamples = cv,
+#  grid = xgb_grid,metrics = mt,
+#  control = control_grid(save_pred = TRUE)
+#)
+
+#saveRDS(xgb_res,"Hyperparameters fine tuning/xgb_res.rds")
+xgb_res <- readRDS("Hyperparameters fine tuning/xgb_res.rds")
+
+
+xgb_res %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  select(mean, mtry:sample_size) %>%
+  pivot_longer(mtry:sample_size,
+               values_to = "value",
+               names_to = "parameter"
+  ) %>%
+  ggplot(aes(value, mean, color = parameter)) +
+  geom_point(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~parameter, scales = "free_x") +
+  labs(x = NULL, y = "rmse")
+
+
+```
+
+## Selecting the best parameters
+
+```{r}
+
+best_rmse <- select_best(xgb_res, "rmse")
+best_rmse
+
+```
+
+## Adding parameters to the final model
+
+```{r}
+
+final_xgb <- finalize_workflow(
+  xgb_wf,
+  best_rmse
+)
+
+final_xgb
+
+```
+
+# Final Model
+
+```{r}
+
+#final_res <- last_fit(final_xgb, data_split, metrics = mt)
+
+#saveRDS(final_res,"Modelo/final_res.rds")
+final_res <- readRDS("Modelo/final_res.rds")
+
+collect_metrics(final_res)
+
+```
+
+# Error Translation and Interpretation
+
+```{r}
+
+
+
+df5 <- data_test 
+
+df5$predictions <- collect_predictions(final_res) %>% 
+  select(.pred) %>% 
+  rename(predictions = ".pred")
+
+
+
+```
+
+
+## Business Performance
+
+```{r}
+
+df51 <- df5 %>% 
+  group_by(pickup_borough) %>% 
+  summarise(predictions = sum(predictions), .groups= "drop") %>% 
+  arrange(-predictions)
+
+
+df5_aux3 <- df5 %>% 
+  group_by(pickup_borough) %>% 
+  summarise(MAE = mae(fare_amount, predictions),
+            MAPE = mape(fare_amount, predictions)*100,
+            .groups="drop") 
+  
+df52 <- df51 %>% 
+  inner_join(df5_aux3, by="pickup_borough")
+
+df52$worst_scenario <- df52$predictions - df52$MAE
+
+df52$best_scenario <- df52$predictions + df52$MAE
+
+df52 %>% 
+  select(pickup_borough, predictions, worst_scenario, best_scenario, MAE, MAPE)
+
+```
+```{r}
+
+df5 %>% 
+  select(predictions, pickup_borough, hour_of_day) %>% 
+  group_by(pickup_borough) %>% 
+  summarise(Faturamento = sum(predictions), .groups="drop")
+
+```
+
+```{r}
+
+df5 %>% 
+  select(fare_amount, pickup_borough, hour_of_day) 
+  
+```
+
+```{r, fig.width= 14}
+
+df4 %>% 
+  ggplot(aes(hour_of_day, fare_amount, fill = pickup_borough), col= "black")+
+  geom_bar(stat='identity',show.legend = FALSE )+
+  scale_x_continuous(breaks = seq(0,24, 1))+
+  facet_wrap(~pickup_borough)+
+  scale_y_continuous(labels = function(x) format(x, scientific = FALSE))
+  
+
+```
+
+```{r}
+
+df4 %>% 
+  group_by(pickup_borough, hour_of_day) %>% 
+  summarise(numero_viagens = n(), .groups="drop") %>% 
+  arrange(-numero_viagens)
+```
+
+
+## Total Performance
+
+## Performance Machine Learning
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ranger_spec <-
+  rand_forest(mtry = tune(), min_n = tune(), trees = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("ranger")
+
+ranger_workflow <-
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(ranger_spec)
+
+set.seed(1234)
+doParallel::registerDoParallel()
+ranger_tune <-
+  tune_grid(ranger_workflow,
+    resamples = cv,metrics= mt,
+    grid = 11
+  )
+  
+  
+
